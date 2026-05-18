@@ -1,3 +1,5 @@
+import csv
+import json
 from collections import defaultdict
 from pathlib import Path
 
@@ -5,6 +7,101 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+
+
+def plot_train_log(log_path: Path, save_path: Path | None = None) -> None:
+    rows = list(csv.DictReader(open(log_path)))
+    epochs     = [int(r['epoch'])      for r in rows]
+    train_loss = [float(r['train_loss']) for r in rows]
+    val_loss   = [float(r['val_loss'])   for r in rows]
+    val_acc    = [float(r['val_acc'])    for r in rows]
+    val_mca    = [float(r['val_mca'])    for r in rows]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+
+    ax1.plot(epochs, train_loss, label='train_loss')
+    ax1.plot(epochs, val_loss,   label='val_loss')
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('Loss')
+    ax1.set_title('Loss')
+    ax1.legend()
+
+    ax2.plot(epochs, val_acc, label='val_acc')
+    ax2.plot(epochs, val_mca, label='val_mca')
+    ax2.set_xlabel('Epoch')
+    ax2.set_ylabel('Accuracy')
+    ax2.set_title('Validation Accuracy')
+    ax2.legend()
+
+    plt.tight_layout()
+    out = save_path or Path(log_path).parent / 'train_curve.png'
+    plt.savefig(out, dpi=150)
+    plt.close()
+    print(f"Saved: {out}")
+
+
+def plot_head_comparison(epochs: int = 30, runs_root: Path = Path('runs'),
+                         save_path: Path | None = None) -> None:
+    heads = ['linear', 'mlp', 'lora16', 'lora32']
+    shots = ['20', '40', 'full']
+    labels = {'linear': 'Linear', 'mlp': 'MLP', 'lora16': 'LoRA-16', 'lora32': 'LoRA-32'}
+
+    # acc[head][shot] = top1_acc or None
+    acc: dict[str, dict[str, float | None]] = {h: {} for h in heads}
+    for head in heads:
+        for shot in shots:
+            p = runs_root / f'{head}_{shot}_{epochs}e' / 'eval_results.json'
+            if p.exists():
+                acc[head][shot] = json.loads(p.read_text())['top1_acc']
+            else:
+                acc[head][shot] = None
+
+    x      = np.arange(len(shots))
+    width  = 0.18
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    for i, head in enumerate(heads):
+        values = [acc[head][s] if acc[head][s] is not None else 0 for s in shots]
+        bars   = ax.bar(x + i * width, values, width, label=labels[head])
+        for bar, shot in zip(bars, shots):
+            if acc[head][shot] is not None:
+                ax.text(bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + 0.005,
+                        f'{acc[head][shot]:.3f}',
+                        ha='center', va='bottom', fontsize=8)
+
+    ax.axhline(0.58, color='gray',   linestyle='--', linewidth=1.2, label='Gemma 4 (58%)')
+    ax.axhline(0.65, color='tomato', linestyle='--', linewidth=1.2, label='Swin-LoRA (65%)')
+
+    ax.set_xticks(x + width * 1.5)
+    ax.set_xticklabels([f'{s}-shot' if s != 'full' else 'full' for s in shots])
+    ax.set_ylabel('Top-1 Accuracy')
+    ax.set_title(f'Head Comparison — Top-1 Acc ({epochs} epochs)')
+    ax.set_ylim(0, 1.05)
+    ax.legend()
+    plt.tight_layout()
+
+    out = save_path or runs_root / 'head_comparison.png'
+    plt.savefig(out, dpi=150)
+    plt.close()
+    print(f"Saved: {out}")
+
+
+if __name__ == '__main__':
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('logs', nargs='*', help='train_log.csv paths')
+    parser.add_argument('--compare', action='store_true', help='plot head comparison')
+    parser.add_argument('--epochs',  type=int, default=30)
+    args = parser.parse_args()
+
+    if args.compare:
+        plot_head_comparison(epochs=args.epochs)
+    else:
+        for path in args.logs:
+            plot_train_log(Path(path))
 
 
 def compute_metrics(preds: list[int], labels: list[int]) -> dict:
