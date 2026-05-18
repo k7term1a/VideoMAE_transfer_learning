@@ -53,8 +53,10 @@ class VideoClassifier(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, T, C, H, W)  →  model expects (B, C, T, H, W)
         pixel_values = x.permute(0, 2, 1, 3, 4)
-        outputs      = self.backbone(pixel_values=pixel_values)
-        cls_token    = outputs.last_hidden_state[:, 0]   # (B, 768)
+        outputs   = self.backbone(pixel_values=pixel_values)
+        # VideoMAEv2 returns a plain tensor; other HF models return ModelOutput
+        hidden    = outputs.last_hidden_state if hasattr(outputs, 'last_hidden_state') else outputs
+        cls_token = hidden   # (B, 768) — backbone already returns pooled representation
         return self.head(cls_token)
 
 
@@ -121,11 +123,13 @@ class LinearHead(nn.Module):
     def __init__(self, num_classes: int):
         super().__init__()
         # TODO ↓
+        self.linear = nn.Linear(768, num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, 768)
         # TODO ↓
-        raise NotImplementedError
+        return self.linear(x)
+        # raise NotImplementedError
 
 
 class MLPHead(nn.Module):

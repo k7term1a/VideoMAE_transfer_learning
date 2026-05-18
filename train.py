@@ -8,7 +8,8 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
+from tqdm import tqdm
 
 from dataset import build_loaders
 from model import build_model
@@ -51,12 +52,13 @@ def train_one_epoch(
     model.train()
     total_loss, total_correct, total = 0.0, 0, 0
 
-    for pixel_values, labels in loader:
+    pbar = tqdm(loader, desc='train', leave=False, dynamic_ncols=True)
+    for pixel_values, labels in pbar:
         pixel_values = pixel_values.to(device)
         labels       = labels.to(device)
 
         optimizer.zero_grad()
-        with autocast():
+        with autocast('cuda'):
             logits = model(pixel_values)
             loss   = criterion(logits, labels)
 
@@ -70,6 +72,8 @@ def train_one_epoch(
         total_loss    += loss.item() * bs
         total_correct += (logits.argmax(1) == labels).sum().item()
         total         += bs
+
+        pbar.set_postfix(loss=f'{loss.item():.4f}')
 
     return total_loss / total, total_correct / total
 
@@ -89,7 +93,7 @@ def evaluate(
         pixel_values = pixel_values.to(device)
         labels       = labels.to(device)
 
-        with autocast():
+        with autocast('cuda'):
             logits = model(pixel_values)
             loss   = criterion(logits, labels)
 
@@ -138,7 +142,7 @@ def main() -> None:
         [p for p in model.parameters() if p.requires_grad], lr=1e-4
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
-    scaler    = GradScaler()
+    scaler    = GradScaler('cuda')
 
     log_path = output_dir / 'train_log.csv'
     with open(log_path, 'w', newline='') as f:

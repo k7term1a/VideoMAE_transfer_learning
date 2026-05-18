@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 
 import torch
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 
 from dataset import VideoDataset
 from model import build_model
@@ -51,7 +51,7 @@ def main() -> None:
         pixel_values = pixel_values.unsqueeze(0).to(device)  # (1, T, C, H, W)
 
         t0 = time.perf_counter()
-        with torch.no_grad(), autocast():
+        with torch.no_grad(), autocast('cuda'):
             logits = model(pixel_values)
         times.append(time.perf_counter() - t0)
 
