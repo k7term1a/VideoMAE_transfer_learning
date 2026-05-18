@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environment
+.venv/
+
+# Dataset & cache (too large for git)
+video-dataset/
+video-dataset.zip
+cache/
+
+# Model outputs
+runs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store

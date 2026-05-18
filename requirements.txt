@@ -1,0 +1,28 @@
+# torch (V100 / CUDA 11.8) — 用 uv pip install 時需搭配 --index-url
+torch==2.6.0
+torchvision==0.21.0
+torchaudio==2.6.0
+
+# HuggingFace
+transformers>=4.40
+huggingface-hub>=0.22
+
+# 影像/影片處理
+timm>=0.9
+av>=12.0
+decord>=0.6
+
+# 資料與評估
+scikit-learn>=1.4
+numpy>=1.26
+pillow>=10.0
+
+# 視覺化與紀錄
+matplotlib>=3.8
+tqdm>=4.66
+
+# 資料下載
+kaggle>=1.6
+
+
+easydict>=1.13
