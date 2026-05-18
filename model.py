@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.init as init
 from transformers import AutoModel, AutoConfig
 
 BACKBONE_ID = "OpenGVLab/VideoMAEv2-Base"
@@ -112,10 +113,30 @@ class LoRALinear(nn.Module):
         super().__init__()
         self.rank = rank
         # TODO ↓
+        self.original_linear    = linear
+        self.rank = rank
+
+        self.lora_A = nn.Linear(linear.in_features, rank, bias=False)
+        self.lora_B = nn.Linear(rank, linear.out_features)
+
+        init.kaiming_uniform_(self.lora_A.weight)
+        init.zeros_(self.lora_B.weight)
+    
+    @property
+    def weight(self):
+        return self.original_linear.weight + (self.lora_B.weight @ self.lora_A.weight) / self.rank
+    
+    @property
+    def bias(self):
+        return self.original_linear.bias
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # TODO ↓
-        raise NotImplementedError
+        original_x  = self.original_linear(x)
+        lora_x      = self.lora_B(self.lora_A(x)) / self.rank
+
+        return original_x + lora_x
+        # raise NotImplementedError
 
 
 class LinearHead(nn.Module):
@@ -162,8 +183,10 @@ class LoRAHead(nn.Module):
     def __init__(self, num_classes: int):
         super().__init__()
         # TODO ↓
+        self.map_linear = nn.Linear(768, num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, 768)
         # TODO ↓
-        raise NotImplementedError
+        return self.map_linear(x)
+        # raise NotImplementedError
