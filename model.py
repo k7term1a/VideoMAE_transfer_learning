@@ -137,11 +137,20 @@ class MLPHead(nn.Module):
     def __init__(self, num_classes: int):
         super().__init__()
         # TODO ↓
+        self.linear     = nn.Linear(768, 512)
+        self.gelu       = nn.GELU()
+        self.drop       = nn.Dropout(0.3)
+        self.linear2    = nn.Linear(512, num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, 768)
         # TODO ↓
-        raise NotImplementedError
+        x = self.linear(x)
+        x = self.gelu(x)
+        x = self.drop(x)
+        x = self.linear2(x)
+        return x
+        # raise NotImplementedError
 
 
 class LoRAHead(nn.Module):
