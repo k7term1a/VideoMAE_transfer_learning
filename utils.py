@@ -41,7 +41,8 @@ def plot_train_log(log_path: Path, save_path: Path | None = None) -> None:
 
 
 def plot_head_comparison(epochs: int = 30, runs_root: Path = Path('runs'),
-                         save_path: Path | None = None) -> None:
+                         save_path: Path | None = None,
+                         backbone_tag: str = 'k710') -> None:
     heads = ['linear', 'mlp', 'lora16', 'lora32']
     shots = ['20', '40', 'full']
     labels = {'linear': 'Linear', 'mlp': 'MLP', 'lora16': 'LoRA-16', 'lora32': 'LoRA-32'}
@@ -50,7 +51,7 @@ def plot_head_comparison(epochs: int = 30, runs_root: Path = Path('runs'),
     acc: dict[str, dict[str, float | None]] = {h: {} for h in heads}
     for head in heads:
         for shot in shots:
-            p = runs_root / f'{head}_{shot}_{epochs}e' / 'eval_results.json'
+            p = runs_root / f'{backbone_tag}_{head}_{shot}_{epochs}e' / 'eval_results.json'
             if p.exists():
                 acc[head][shot] = json.loads(p.read_text())['top1_acc']
             else:
@@ -93,12 +94,13 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument('logs', nargs='*', help='train_log.csv paths')
-    parser.add_argument('--compare', action='store_true', help='plot head comparison')
-    parser.add_argument('--epochs',  type=int, default=30)
+    parser.add_argument('--compare',      action='store_true', help='plot head comparison')
+    parser.add_argument('--epochs',       type=int, default=30)
+    parser.add_argument('--backbone_tag', default='k710')
     args = parser.parse_args()
 
     if args.compare:
-        plot_head_comparison(epochs=args.epochs)
+        plot_head_comparison(epochs=args.epochs, backbone_tag=args.backbone_tag)
     else:
         for path in args.logs:
             plot_train_log(Path(path))

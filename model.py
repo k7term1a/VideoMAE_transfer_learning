@@ -1,9 +1,15 @@
 import torch
 import torch.nn as nn
 import torch.nn.init as init
+from pathlib import Path
 from transformers import AutoModel, AutoConfig
 
-BACKBONE_ID = "OpenGVLab/VideoMAEv2-Base"
+BACKBONE_ID  = "OpenGVLab/VideoMAEv2-Base"
+BACKBONE_PTH = Path(__file__).parent / "vit_b_k710_dl_from_giant.pth"
+_BACKBONE_CHOICES = {
+    'k710':   BACKBONE_PTH,   # local .pth
+    'vmaev2': None,           # HuggingFace
+}
 
 # Names of attention projection layers to inject LoRA into.
 # VideoMAEv2 uses a fused 'qkv' projection; separate q/v names are listed as
@@ -11,12 +17,40 @@ BACKBONE_ID = "OpenGVLab/VideoMAEv2-Base"
 _LORA_TARGET_NAMES = {'qkv', 'q', 'v', 'q_proj', 'v_proj'}
 
 
-def load_backbone() -> nn.Module:
-    config   = AutoConfig.from_pretrained(BACKBONE_ID, trust_remote_code=True)
-    backbone = AutoModel.from_pretrained(BACKBONE_ID, config=config, trust_remote_code=True)
-    for p in backbone.parameters():
+def load_backbone(backbone: str = 'vmaev2') -> nn.Module:
+    if backbone not in _BACKBONE_CHOICES:
+        raise ValueError(f"Unknown backbone {backbone!r}. Choose from: {list(_BACKBONE_CHOICES)}")
+
+    config = AutoConfig.from_pretrained(BACKBONE_ID, trust_remote_code=True)
+    pth    = _BACKBONE_CHOICES[backbone]
+
+    if pth is not None:
+        if not pth.exists():
+            raise FileNotFoundError(f"{pth} not found. Download it first.")
+        model = AutoModel.from_config(config, trust_remote_code=True)
+        ckpt       = torch.load(pth, map_location='cpu', weights_only=True)
+        state_dict = ckpt.get('model', ckpt)
+        # Strip DDP/DataParallel wrapping
+        first_key = next(iter(state_dict))
+        if first_key == 'module':
+            state_dict = state_dict['module']
+        elif first_key.startswith('module.'):
+            state_dict = {k.removeprefix('module.'): v for k, v in state_dict.items()}
+        # HF model wraps the ViT under 'model.' sub-module
+        remapped = {'model.' + k: v for k, v in state_dict.items()}
+        missing, unexpected = model.load_state_dict(remapped, strict=False)
+        if missing:
+            print(f"[load_backbone] missing keys ({len(missing)}): {missing[:5]} ...")
+        if unexpected:
+            print(f"[load_backbone] unexpected keys ({len(unexpected)}): {unexpected[:5]} ...")
+        print(f"[load_backbone] loaded weights from {pth}")
+    else:
+        model = AutoModel.from_pretrained(BACKBONE_ID, config=config, trust_remote_code=True)
+        print(f"[load_backbone] loaded weights from HuggingFace ({BACKBONE_ID})")
+
+    for p in model.parameters():
         p.requires_grad = False
-    return backbone
+    return model
 
 
 def inject_lora(backbone: nn.Module, rank: int) -> int:
@@ -61,8 +95,9 @@ class VideoClassifier(nn.Module):
         return self.head(cls_token)
 
 
-def build_model(head_type: str, num_classes: int, lora_rank: int = 16) -> VideoClassifier:
-    backbone = load_backbone()
+def build_model(head_type: str, num_classes: int, lora_rank: int = 16,
+                backbone: str = 'vmaev2') -> VideoClassifier:
+    backbone = load_backbone(backbone)
 
     if head_type == 'linear':
         head = LinearHead(num_classes)

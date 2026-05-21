@@ -23,9 +23,9 @@ def set_seed(seed: int = 42) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-def make_run_name(head: str, shot: str, epochs: int, lora_rank: int) -> str:
+def make_run_name(head: str, shot: str, epochs: int, lora_rank: int, backbone: str) -> str:
     prefix = f"lora{lora_rank}" if head == 'lora' else head
-    return f"{prefix}_{shot}_{epochs}e"
+    return f"{backbone}_{prefix}_{shot}_{epochs}e"
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,6 +36,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--epochs',     type=int, default=30)
     p.add_argument('--batch_size', type=int, default=8)
     p.add_argument('--lora_rank',  type=int, default=16)
+    p.add_argument('--backbone',   default='vmaev2', choices=['k710', 'vmaev2'])
     p.add_argument('--run_name',   default=None,
                    help="Override auto-generated output directory name")
     return p.parse_args()
@@ -114,7 +115,7 @@ def main() -> None:
     set_seed(42)
 
     shot       = None if args.shot == 'full' else int(args.shot)
-    run_name   = args.run_name or make_run_name(args.head, args.shot, args.epochs, args.lora_rank)
+    run_name   = args.run_name or make_run_name(args.head, args.shot, args.epochs, args.lora_rank, args.backbone)
     output_dir = Path('runs') / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -131,7 +132,7 @@ def main() -> None:
         with open(output_dir / 'split_index.json', 'w') as f:
             json.dump({'split_indices': split_indices, 'class_to_idx': class_to_idx}, f, indent=2)
 
-    model = build_model(args.head, num_classes, lora_rank=args.lora_rank).to(device)
+    model = build_model(args.head, num_classes, lora_rank=args.lora_rank, backbone=args.backbone).to(device)
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_p   = sum(p.numel() for p in model.parameters())

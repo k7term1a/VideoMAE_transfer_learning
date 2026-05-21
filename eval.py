@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 from torch.amp import autocast
 
-from dataset import VideoDataset
+from dataset import VideoDataset, _read_frames
 from model import build_model
 from utils import compute_metrics, plot_confusion_matrix
 
@@ -15,6 +15,9 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Evaluate a VideoMAEv2 checkpoint on the test set")
     p.add_argument('--checkpoint', required=True, help="Path to best.pt")
     p.add_argument('--head',       required=True, choices=['linear', 'mlp', 'lora'])
+    p.add_argument('--backbone',   default='vmaev2', choices=['k710', 'vmaev2'])
+    p.add_argument('--no_cache',   action='store_true',
+                   help='Time full pipeline: video decode + preprocess + forward')
     return p.parse_args()
 
 
@@ -33,7 +36,7 @@ def main() -> None:
     num_classes   = len(class_to_idx)
     idx_to_class  = {v: k for k, v in class_to_idx.items()}
 
-    model = build_model(args.head, num_classes, lora_rank=lora_rank)
+    model = build_model(args.head, num_classes, lora_rank=lora_rank, backbone=args.backbone)
     model.load_state_dict(ckpt['model_state'])
     model.to(device).eval()
 
@@ -47,13 +50,26 @@ def main() -> None:
     torch.cuda.reset_peak_memory_stats(device)
 
     for i in range(len(test_ds)):
-        pixel_values, label = test_ds[i]
-        pixel_values = pixel_values.unsqueeze(0).to(device)  # (1, T, C, H, W)
-
-        t0 = time.perf_counter()
-        with torch.no_grad(), autocast('cuda'):
-            logits = model(pixel_values)
-        times.append(time.perf_counter() - t0)
+        if args.no_cache:
+            # Full pipeline: video decode → preprocess → GPU transfer → forward
+            path, label = test_ds.samples[i]
+            t0 = time.perf_counter()
+            frames = _read_frames(path)
+            if frames is None:
+                continue
+            frame_list   = [frames[j] for j in range(frames.shape[0])]
+            inputs       = test_ds.processor(frame_list, return_tensors='pt')
+            pixel_values = inputs['pixel_values'].squeeze(0).unsqueeze(0).to(device)
+            with torch.no_grad(), autocast('cuda'):
+                logits = model(pixel_values)
+            times.append(time.perf_counter() - t0)
+        else:
+            pixel_values, label = test_ds[i]
+            pixel_values = pixel_values.unsqueeze(0).to(device)
+            t0 = time.perf_counter()
+            with torch.no_grad(), autocast('cuda'):
+                logits = model(pixel_values)
+            times.append(time.perf_counter() - t0)
 
         all_preds.append(logits.argmax(1).item())
         all_labels.append(label)
@@ -79,9 +95,12 @@ def main() -> None:
         save_path=output_dir / 'confusion_matrix.png',
     )
 
+    timing_scope = "decode+preprocess+forward" if args.no_cache else "forward only"
+    total_sec    = sum(times)
     print(f"\nTop-1 Acc  : {metrics['top1_acc']:.4f}")
     print(f"MCA        : {metrics['mca']:.4f}")
-    print(f"sec / vid  : {sec_per_vid:.4f}")
+    print(f"sec / vid  : {sec_per_vid:.4f}  ({timing_scope})")
+    print(f"total sec  : {total_sec:.2f}s  ({len(times)} videos)")
     print(f"VRAM peak  : {vram_mib:.1f} MiB")
     print(f"Saved to   : {output_dir}")
 

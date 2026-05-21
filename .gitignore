@@ -19,3 +19,5 @@ runs/
 
 # OS
 .DS_Store
+
+vit_b_k710_dl_from_giant.pth
