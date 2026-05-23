@@ -39,7 +39,10 @@ def get_classes() -> list[str]:
 
 
 def _read_frames(path: Path) -> np.ndarray | None:
-    """Return (T, H, W, C) uint8 numpy array, or None on failure."""
+    """Return (T, H, W, C) uint8 numpy array with NUM_FRAMES frames, or None on failure.
+
+    Uniformly samples NUM_FRAMES frames across the full video duration.
+    """
     try:
         import decord
         vr      = decord.VideoReader(str(path), ctx=decord.cpu(0))
@@ -59,6 +62,89 @@ def _read_frames(path: Path) -> np.ndarray | None:
         return frames_t[indices].numpy()
     except Exception:
         return None
+
+
+def _read_multi_clips(
+    path: Path,
+    n_clips: int = 3,
+) -> list[np.ndarray] | None:
+    """Extract n_clips temporally-jittered uniform samples over the full video.
+
+    Each clip uniformly samples NUM_FRAMES frames across the *entire* video
+    duration, preserving global temporal coverage — just like the training
+    pipeline.  The n_clips grids are shifted by a sub-stride offset so they
+    sample slightly different frame positions while each covering the whole
+    video:
+
+        stride  = (T - 1) / (NUM_FRAMES - 1)          # spacing between frames
+        jitter  = stride / n_clips                     # shift per clip
+        clip i  : linspace(0, T-1, NUM_FRAMES) + i * jitter   (clipped to [0,T-1])
+
+    Example — T=160, NUM_FRAMES=16, n_clips=3:
+        stride ≈ 10.67  →  jitter ≈ 3.56
+        clip 0: [ 0, 11, 21, 32, ...]
+        clip 1: [ 4, 14, 25, 35, ...]
+        clip 2: [ 7, 18, 28, 39, ...]
+
+    Edge case:
+    - T < NUM_FRAMES: pad last frame to NUM_FRAMES, return [single_clip].
+
+    Returns list of (NUM_FRAMES, H, W, C) uint8 arrays, or None on I/O failure.
+    """
+    # ── get total frame count without loading all frames ──────────────────────
+    vr = None
+    total: int = 0
+    try:
+        import decord
+        vr    = decord.VideoReader(str(path), ctx=decord.cpu(0))
+        total = len(vr)
+    except Exception:
+        vr = None
+
+    torchvision_frames: np.ndarray | None = None
+    if vr is None:
+        try:
+            import torchvision
+            frames_t, _, _ = torchvision.io.read_video(
+                str(path), pts_unit='sec', output_format='THWC'
+            )
+            torchvision_frames = frames_t.numpy()
+            total = len(torchvision_frames)
+        except Exception:
+            return None
+
+    # ── short video: pad last frame to NUM_FRAMES, single clip ────────────────
+    if total < NUM_FRAMES:
+        if vr is not None:
+            raw = vr.get_batch(list(range(total))).asnumpy()
+        else:
+            raw = torchvision_frames  # type: ignore[assignment]
+        pad    = np.stack([raw[-1]] * (NUM_FRAMES - total), axis=0)
+        return [np.concatenate([raw, pad], axis=0)]
+
+    # ── compute per-clip frame indices (jittered uniform grids) ───────────────
+    base   = np.linspace(0, total - 1, NUM_FRAMES)
+    stride = (total - 1) / (NUM_FRAMES - 1)
+    jitter = stride / n_clips
+
+    clip_indices: list[np.ndarray] = []
+    for i in range(n_clips):
+        indices = np.clip(base + i * jitter, 0, total - 1).astype(int)
+        clip_indices.append(indices)
+
+    # ── read only the unique frames that are actually needed ──────────────────
+    all_needed  = sorted({int(idx) for idxs in clip_indices for idx in idxs})
+    if vr is not None:
+        needed_frames = vr.get_batch(all_needed).asnumpy()        # (≤n_clips*NUM_FRAMES, H, W, C)
+    else:
+        needed_frames = torchvision_frames[all_needed]             # type: ignore[index]
+    pos_map = {orig: pos for pos, orig in enumerate(all_needed)}   # frame_idx → row in needed_frames
+
+    clips: list[np.ndarray] = []
+    for idxs in clip_indices:
+        clips.append(needed_frames[[pos_map[int(i)] for i in idxs]])
+
+    return clips
 
 
 class VideoDataset(Dataset):

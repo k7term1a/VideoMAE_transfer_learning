@@ -1,23 +1,30 @@
 import argparse
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import torch
 from torch.amp import autocast
 
-from dataset import VideoDataset, _read_frames
+from dataset import VideoDataset, _read_frames, _read_multi_clips
 from model import build_model
 from utils import compute_metrics, plot_confusion_matrix
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Evaluate a VideoMAEv2 checkpoint on the test set")
-    p.add_argument('--checkpoint', required=True, help="Path to best.pt")
-    p.add_argument('--head',       required=True, choices=['linear', 'mlp', 'lora'])
-    p.add_argument('--backbone',   default='vmaev2', choices=['k710', 'vmaev2'])
-    p.add_argument('--no_cache',   action='store_true',
+    p.add_argument('--checkpoint',  required=True, help="Path to best.pt")
+    p.add_argument('--head',        required=True, choices=['linear', 'mlp', 'lora'])
+    p.add_argument('--backbone',    default='vmaev2', choices=['k710', 'vmaev2'])
+    p.add_argument('--no_cache',    action='store_true',
                    help='Time full pipeline: video decode + preprocess + forward')
+    p.add_argument('--multi_clip',  action='store_true',
+                   help='Multi-clip inference: extract 3 evenly-spaced clips, average logits. '
+                        'Implies reading from video (bypasses cache). '
+                        'Can be combined with --no_cache to also measure decode time.')
+    p.add_argument('--n_clips',     type=int, default=3,
+                   help='Number of clips for --multi_clip (default: 3)')
     return p.parse_args()
 
 
@@ -50,12 +57,42 @@ def main() -> None:
     torch.cuda.reset_peak_memory_stats(device)
 
     for i in range(len(test_ds)):
-        if args.no_cache:
-            # Full pipeline: video decode → preprocess → GPU transfer → forward
-            path, label = test_ds.samples[i]
-            t0 = time.perf_counter()
+        path, label = test_ds.samples[i]
+
+        if args.multi_clip:
+            # ── Multi-clip inference ──────────────────────────────────────────
+            # Optimisations:
+            #   1. _read_multi_clips reads only the unique frames needed.
+            #   2. Preprocessing for each clip runs in parallel (threads).
+            #   3. All clips are batched into a single forward pass.
+            t0    = time.perf_counter()
+            clips = _read_multi_clips(path, n_clips=args.n_clips)
+            if clips is None:
+                print(f"  [warn] cannot read {path.name}, skipping")
+                continue
+
+            def preprocess_clip(clip: "np.ndarray") -> torch.Tensor:
+                frame_list = [clip[j] for j in range(clip.shape[0])]
+                return test_ds.processor(frame_list, return_tensors='pt')['pixel_values'].squeeze(0)
+
+            # Parallel preprocessing (I/O-free CPU work → threads are sufficient)
+            with ThreadPoolExecutor(max_workers=len(clips)) as pool:
+                pixel_values_list = list(pool.map(preprocess_clip, clips))
+
+            # Single batched forward pass  (batch = n_clips)
+            pixel_values_batch = torch.stack(pixel_values_list, dim=0).to(device)
+            with torch.no_grad(), autocast('cuda'):
+                logits_batch = model(pixel_values_batch)          # (n_clips, num_classes)
+
+            logits = logits_batch.mean(dim=0, keepdim=True)       # (1, num_classes)
+            times.append(time.perf_counter() - t0)
+
+        elif args.no_cache:
+            # ── Single-clip, full pipeline (decode → preprocess → forward) ───
+            t0     = time.perf_counter()
             frames = _read_frames(path)
             if frames is None:
+                print(f"  [warn] cannot read {path.name}, skipping")
                 continue
             frame_list   = [frames[j] for j in range(frames.shape[0])]
             inputs       = test_ds.processor(frame_list, return_tensors='pt')
@@ -63,7 +100,9 @@ def main() -> None:
             with torch.no_grad(), autocast('cuda'):
                 logits = model(pixel_values)
             times.append(time.perf_counter() - t0)
+
         else:
+            # ── Single-clip, cached (forward only) ───────────────────────────
             pixel_values, label = test_ds[i]
             pixel_values = pixel_values.unsqueeze(0).to(device)
             t0 = time.perf_counter()
@@ -95,7 +134,12 @@ def main() -> None:
         save_path=output_dir / 'confusion_matrix.png',
     )
 
-    timing_scope = "decode+preprocess+forward" if args.no_cache else "forward only"
+    if args.multi_clip:
+        timing_scope = f"decode+preprocess+{args.n_clips}×forward (multi-clip)"
+    elif args.no_cache:
+        timing_scope = "decode+preprocess+forward"
+    else:
+        timing_scope = "forward only (cached)"
     total_sec    = sum(times)
     print(f"\nTop-1 Acc  : {metrics['top1_acc']:.4f}")
     print(f"MCA        : {metrics['mca']:.4f}")
